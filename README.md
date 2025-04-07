@@ -4,6 +4,13 @@
 
 A benchmark and framework for evaluating and training models on OEIS (Online Encyclopedia of Integer Sequences) next-term prediction tasks.
 
+
+## Performance Leaderboard
+
+Current model performance on the OEIS next-term prediction benchmark:
+
+![Model Performance Leaderboard](graphs/leaderboard.png)
+
 ## Overview
 
 This project evaluates the ability of language models to predict the next term in integer sequences from the [Online Encyclopedia of Integer Sequences (OEIS)](https://oeis.org/). It includes:
@@ -47,11 +54,6 @@ This project evaluates the ability of language models to predict the next term i
 - `plot-logs.py`: Visualize training metrics
 - `graphs/`: Output directory for generated visualizations
 
-## Performance Leaderboard
-
-Current model performance on the OEIS next-term prediction benchmark:
-
-![Model Performance Leaderboard](graphs/leaderboard.png)
 
 ## Beam Search vs Greedy Decoding
 
