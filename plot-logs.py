@@ -61,18 +61,19 @@ def process_log(log_file: Path) -> tuple[list, list, list, list, list]:
             pass
     
     # EMA smoothing for training loss
-    ema = 0.99
+    ema = 0.999
     smoothed_train_losses = [train_losses[0]]
     for loss in train_losses[1:]:
         smoothed_train_losses.append(ema * smoothed_train_losses[-1] + (1 - ema) * loss)
     
     # EMA smoothing for validation loss
-    ema_val = 0.9
+    ema_val = 0.0
     smoothed_val_losses = []
     if val_losses:
         smoothed_val_losses = [val_losses[0]]
         for loss in val_losses[1:]:
             smoothed_val_losses.append(ema_val * smoothed_val_losses[-1] + (1 - ema_val) * loss)
+            ema_val = ema ** (1000/16)
     
     return tokens, smoothed_train_losses, val_steps, val_losses, smoothed_val_losses
 
@@ -81,60 +82,27 @@ def main():
     parser.add_argument('run_names', type=str, nargs='+', help='Names of the training runs to plot')
     args = parser.parse_args()
 
-    # Create a figure with 2 rows, 2 columns
-    plt.figure(figsize=(16, 12))
+    # Create a figure with 1 row, 2 columns
+    plt.figure(figsize=(16, 8))
     
-    # Full range training loss plot
-    plt.subplot(2, 2, 1)
+    # Full range training and validation loss plot
+    plt.subplot(1, 2, 1)
+    has_validation_data = False
+    
     for run_name in args.run_names:
         log_file = Path("runs") / run_name / "log.txt"
         if not log_file.exists():
             print(f"Error: Log file not found at {log_file}")
             continue
             
-        tokens, train_losses, val_steps, val_losses, _ = process_log(log_file)
-        plt.plot(tokens, train_losses, label=f"{run_name} (train)")
-    
-    plt.xlabel("Total tokens processed")
-    plt.ylabel("Loss")
-    plt.title("Training Loss vs. Total tokens processed")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    # Last 80% training loss plot
-    plt.subplot(2, 2, 2)
-    for run_name in args.run_names:
-        log_file = Path("runs") / run_name / "log.txt"
-        if not log_file.exists():
-            continue
-            
-        tokens, train_losses, _, _, _ = process_log(log_file)
-        cutoff = int(0.2*len(tokens))
-        plt.plot(tokens[cutoff:], train_losses[cutoff:], label=f"{run_name} (train)")
-    
-    plt.xlabel("Total tokens processed")
-    plt.ylabel("Loss")
-    plt.title("Training Loss vs. Total tokens processed (last 80%)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Plot validation loss
-    plt.subplot(2, 2, 3)
-    has_validation_data = False
-    for run_name in args.run_names:
-        log_file = Path("runs") / run_name / "log.txt"
-        if not log_file.exists():
-            continue
-            
-        tokens, _, val_steps, val_losses, smoothed_val_losses = process_log(log_file)
+        tokens, train_losses, val_steps, val_losses, smoothed_val_losses = process_log(log_file)
+        
+        # Plot training losses
+        plt.plot(tokens, train_losses, label=f"{run_name} (train EMA)")
+        
+        # Plot validation losses if available
         if val_steps and val_losses:
             has_validation_data = True
-            # Map validation steps to tokens for x-axis
-            step_to_token = {}
-            for i, step in enumerate(tokens):
-                step_to_token[i] = step
-                
-            # Estimate token count for validation steps
             val_tokens = []
             for step in val_steps:
                 if step < len(tokens):
@@ -143,60 +111,60 @@ def main():
                     # Estimate based on last available token count
                     val_tokens.append(tokens[-1] * step / len(tokens))
             
-            plt.plot(val_tokens, val_losses, 'o', alpha=0.5, label=f"{run_name} (val)")
+            #plt.plot(val_tokens, val_losses, 'o', alpha=0.5, label=f"{run_name} (val)")
             plt.plot(val_tokens, smoothed_val_losses, '-', label=f"{run_name} (val EMA)")
     
-    if has_validation_data:
-        plt.xlabel("Total tokens (estimated)")
-        plt.ylabel("Loss")
-        plt.title("Validation Loss")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-    else:
-        plt.title("No validation data available")
-    
-    # Plot training vs validation loss for the best run
-    plt.subplot(2, 2, 4)
-    best_run = None
-    best_final_val_loss = float('inf')
+    plt.xlabel("Total tokens processed")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss (Full Range)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Last 80% training and validation loss plot
+    plt.subplot(1, 2, 2)
     
     for run_name in args.run_names:
         log_file = Path("runs") / run_name / "log.txt"
         if not log_file.exists():
             continue
             
-        _, _, val_steps, val_losses, _ = process_log(log_file)
-        if val_steps and val_losses and val_losses[-1] < best_final_val_loss:
-            best_final_val_loss = val_losses[-1]
-            best_run = run_name
-    
-    if best_run:
-        log_file = Path("runs") / best_run / "log.txt"
         tokens, train_losses, val_steps, val_losses, smoothed_val_losses = process_log(log_file)
         
-        # Plot training curve
-        plt.plot(tokens, train_losses, label=f"{best_run} (train)")
+        # Calculate 20% cutoff point
+        cutoff = int(0.2 * len(tokens))
+        tokens_last_80 = tokens[cutoff:]
+        train_losses_last_80 = train_losses[cutoff:]
         
-        # Plot validation points
-        val_tokens = []
-        for step in val_steps:
-            if step < len(tokens):
-                val_tokens.append(tokens[step])
-            else:
-                # Estimate based on last available token count
-                val_tokens.append(tokens[-1] * step / len(tokens))
+        # Plot training losses for last 80%
+        plt.plot(tokens_last_80, train_losses_last_80, label=f"{run_name} (train EMA)")
         
-        plt.plot(val_tokens, val_losses, 'ro', alpha=0.5, label=f"{best_run} (val)")
-        plt.plot(val_tokens, smoothed_val_losses, 'r-', label=f"{best_run} (val EMA)")
-        plt.xlabel("Total tokens processed")
-        plt.ylabel("Loss")
-        plt.title(f"Training vs Validation Loss for Best Run: {best_run}")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-    else:
-        plt.title("No validation data available for comparison")
+        # Plot validation losses for last 80% if available
+        if val_steps and val_losses:
+            val_tokens = []
+            for step in val_steps:
+                if step < len(tokens):
+                    val_tokens.append(tokens[step])
+                else:
+                    # Estimate based on last available token count
+                    val_tokens.append(tokens[-1] * step / len(tokens))
+            
+            # Filter validation points to only include those in the last 80%
+            last_80_points = [(t, l, s) for t, l, s in zip(val_tokens, val_losses, smoothed_val_losses) 
+                              if t >= tokens_last_80[0]]
+            
+            if last_80_points:
+                last_tokens, last_losses, last_smoothed = zip(*last_80_points)
+                #plt.plot(last_tokens, last_losses, 'o', alpha=0.5, label=f"{run_name} (val)")
+                plt.plot(last_tokens, last_smoothed, '-', label=f"{run_name} (val EMA)")
+    
+    plt.xlabel("Total tokens processed")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss (Last 80%)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
+    plt.savefig("graphs/training_validation_loss.png", dpi=300)  # Save the plot to a file
     plt.show()
 
 if __name__ == "__main__":

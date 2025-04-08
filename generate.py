@@ -4,7 +4,7 @@ import mlx.core as mx
 from train import Trainer
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
 import mlx.nn as nn
-from generate_lite import generate_lite
+from generate_lite import generate_lite, beam_search
 mx.set_default_device(mx.gpu)
 def main():
     parser = argparse.ArgumentParser(description='Generate text using a trained model')
