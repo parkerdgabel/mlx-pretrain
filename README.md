@@ -110,4 +110,4 @@ npm run start
 
 ## License
 
-CC0 (Public Domain)
+[CC BY-SA 4.0](https://oeis.org/wiki/The_OEIS_End-User_License_Agreement)
