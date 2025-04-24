@@ -44,7 +44,6 @@ def process_log(log_file: Path) -> tuple[list, list, list, list, list]:
     if len(tokens) > len(train_losses) + 1:
         tokens = tokens[:len(train_losses) + 1]
     tokens = tokens[1:]
-    
     # Validation data might also be in metadata
     metadata_path = log_file.parent / "metadata.json"
     if metadata_path.exists():
@@ -61,7 +60,7 @@ def process_log(log_file: Path) -> tuple[list, list, list, list, list]:
             pass
     
     # EMA smoothing for training loss
-    ema = 0.999
+    ema = 0.9
     smoothed_train_losses = [train_losses[0]]
     for loss in train_losses[1:]:
         smoothed_train_losses.append(ema * smoothed_train_losses[-1] + (1 - ema) * loss)
@@ -164,7 +163,6 @@ def main():
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig("graphs/training_validation_loss.png", dpi=300)  # Save the plot to a file
     plt.show()
 
 if __name__ == "__main__":

@@ -28,7 +28,9 @@ class DataConfig:
     input_file: str
     preprocessing: Dict[str, int]
     tokenizer: Dict[str, Any]
+    tokenizer_path: Optional[str] = None  # Path to a directory containing a tokenizer.json file
     validation_file: Optional[str] = None
+    weight_path: Optional[str] = None
 
 @dataclass
 class ModelConfig:
@@ -113,11 +115,63 @@ class CheckpointManager:
         return run_dir, run_dir / 'log.txt', checkpoint_dir
 
 class TokenizerManager:
-    def __init__(self, config: DataConfig):
+    def __init__(self, config: DataConfig, run_dir: Optional[Path] = None):
         self.config = config
-        self.setup_vocabulary()
+        self.external_tokenizer = None
+        
+        # Check if an external tokenizer path is provided
+        if config.tokenizer_path is not None:
+            self.use_external_tokenizer(config.tokenizer_path)
+            
+            # If we have a run directory, copy the tokenizer to it
+            if run_dir is not None:
+                self.copy_tokenizer_to_run_dir(config.tokenizer_path, run_dir)
+        else:
+            # Fall back to byte-level tokenization
+            self.setup_vocabulary()
+    
+    def use_external_tokenizer(self, tokenizer_path: str):
+        """Load and use an external tokenizer from the specified path."""
+        from tokenizers import Tokenizer
+        import os
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        
+        if not os.path.exists(tokenizer_file):
+            raise ValueError(f"Tokenizer file not found at {tokenizer_file}")
+        
+        print(f"Loading external tokenizer from {tokenizer_file}")
+        self.external_tokenizer = Tokenizer.from_file(tokenizer_file)
+        
+        # Extract special token IDs
+        vocab = self.external_tokenizer.get_vocab()
+        special_tokens = self.config.tokenizer['special_tokens']
+        
+        # Map special tokens to their IDs
+        self.PAD_TOKEN = vocab.get(special_tokens['pad'])
+        self.BOS_TOKEN = vocab.get(special_tokens['bos'])
+        self.EOS_TOKEN = vocab.get(special_tokens['eos'])
+        self.VOCAB_SIZE = len(vocab)
+        
+        if self.PAD_TOKEN is None or self.BOS_TOKEN is None or self.EOS_TOKEN is None:
+            raise ValueError(f"One or more special tokens not found in the external tokenizer vocabulary")
+    
+    def copy_tokenizer_to_run_dir(self, tokenizer_path: str, run_dir: Path):
+        """Copy the tokenizer files to the run directory."""
+        import shutil
+        import os
+        
+        # Create tokenizer directory in run_dir
+        run_tokenizer_dir = run_dir / 'tokenizer'
+        os.makedirs(run_tokenizer_dir, exist_ok=True)
+        
+        # Copy tokenizer.json
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        shutil.copy2(tokenizer_file, run_tokenizer_dir / "tokenizer.json")
+        
+        print(f"Copied tokenizer to {run_tokenizer_dir}")
         
     def setup_vocabulary(self):
+        """Set up the byte-level tokenization vocabulary."""
         normal_vocab_size = self.config.tokenizer['normal_vocab_size']
         special_tokens = self.config.tokenizer['special_tokens']
         
@@ -134,12 +188,41 @@ class TokenizerManager:
         self.VOCAB_SIZE = normal_vocab_size + len(self.special_token_map)
         
     def tokenize(self, text: str) -> list:
-        return list(text.encode('utf-8'))
+        if self.external_tokenizer is not None:
+            # Use external tokenizer
+            encoded = self.external_tokenizer.encode(text)
+            return encoded.ids
+        else:
+            # Use byte-level tokenization
+            return list(text.encode('utf-8'))
+            
     def detokenize(self, tokens: list) -> str:
-        return bytes(tokens).decode('utf-8', errors='ignore')
-    def tokenize_doc(self, doc: Dict[str, str]) -> list:
+        if self.external_tokenizer is not None:
+            # Use external tokenizer
+            return self.external_tokenizer.decode(tokens.tolist())
+        else:
+            # Use byte-level detokenization
+            return bytes(tokens).decode('utf-8', errors='ignore')
+            
+    def tokenize_doc(self, doc: str) -> list:
+        """Tokenize a document, ensuring it doesn't exceed the max context size.
+        
+        Args:
+            doc: The text to tokenize
+            
+        Returns:
+            A list of token IDs, including BOS and EOS tokens
+        """
         max_length = self.config.preprocessing['max_context_size']
-        return [self.BOS_TOKEN] + self.tokenize(doc)[:max_length] + [self.EOS_TOKEN]
+        
+        if self.external_tokenizer is not None:
+            # Use external tokenizer
+            encoded = self.external_tokenizer.encode(doc)
+            tokens = encoded.ids[:max_length]
+            return [self.BOS_TOKEN] + tokens + [self.EOS_TOKEN]
+        else:
+            # Use byte-level tokenization
+            return [self.BOS_TOKEN] + self.tokenize(doc)[:max_length] + [self.EOS_TOKEN]
 
 class DataManager:
     def __init__(self, config: DataConfig, tokenizer: TokenizerManager, batch_size: int = 1):
@@ -281,8 +364,15 @@ class Trainer:
         
         self.setup_system()
         
-        # Initialize components
-        self.tokenizer = TokenizerManager(self.config.data)
+        # Create run directory early so we can copy tokenizer to it
+        if for_training:
+            self.run_dir, self.log_file, self.checkpoint_dir = CheckpointManager.setup_run_directory(self.config.name)
+        else:
+            self.run_dir = None
+            
+        # Initialize tokenizer with run directory if available
+        self.tokenizer = TokenizerManager(self.config.data, self.run_dir)
+        
         self.setup_model()
         if for_training:
             self.data_manager = DataManager(self.config.data, self.tokenizer, batch_size=self.config.training.hyperparameters['batch_size'])
@@ -342,7 +432,10 @@ class Trainer:
         args = ModelArgs(**valid_args)
 
         self.model = Model(args)
-        
+
+        if self.config.data.weight_path is not None:
+            print(f"Loading weights from {self.config.data.weight_path}")
+            self.model.load_weights(self.config.data.weight_path, strict=False)
         # Log model size
         p = sum(v.size for _, v in tree_flatten(self.model.trainable_parameters())) / 10**6
         print(f"Model has {p:.2f}M parameters")
@@ -369,8 +462,7 @@ class Trainer:
         self.optimizer = opt_manager.create_optimizer(self.lr_schedule)
         
     def setup_logging(self):
-        # Setup run directory structure
-        self.run_dir, self.log_file, self.checkpoint_dir = CheckpointManager.setup_run_directory(self.config.name)
+        # Run directory structure should already be set up in __init__
         
         # Create initial metadata file
         metadata = {
@@ -388,8 +480,22 @@ class Trainer:
             }
         }
         
+        # Add tokenizer information to metadata
+        if self.config.data.tokenizer_path:
+            metadata['tokenizer'] = {
+                'type': 'external',
+                'path': self.config.data.tokenizer_path,
+                'vocab_size': self.tokenizer.VOCAB_SIZE
+            }
+        else:
+            metadata['tokenizer'] = {
+                'type': 'byte-level',
+                'vocab_size': self.tokenizer.VOCAB_SIZE
+            }
+        
         with open(self.run_dir / 'metadata.json', 'w') as f:
             json.dump(metadata, f, indent=2)
+            
         # Save the config used to the run directory
         with open(self.run_dir / 'config.yaml', 'w') as f:
             with open(self.config_path, 'r') as config_file:
