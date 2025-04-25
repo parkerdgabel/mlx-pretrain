@@ -15,7 +15,7 @@ from datetime import datetime
 import os
 #from mlx_lm.models.llama import Model, ModelArgs
 import importlib
-from mlx.utils import tree_flatten, tree_map
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 import inspect
 
 def filter_valid_args(cls, arg_dict):
@@ -62,6 +62,11 @@ class SystemConfig:
     device: str
 
 @dataclass
+class ResumeConfig:
+    checkpoint: str  # Path to checkpoint base name
+    reset_optimizer: bool = False  # Optional flag to reset optimizer state
+
+@dataclass
 class Config:
     name: str  # New field for run name
     data: DataConfig
@@ -69,6 +74,7 @@ class Config:
     training: TrainingConfig
     logging: LoggingConfig
     system: SystemConfig
+    resume: Optional[ResumeConfig] = None
     overwrite: bool = False
 
     @classmethod
@@ -84,6 +90,11 @@ class Config:
         training_config = config_dict['training'].copy()
         epochs = training_config.pop('epochs', None)
         
+        # Extract resume config if present
+        resume_config = None
+        if 'resume' in config_dict:
+            resume_config = ResumeConfig(**config_dict['resume'])
+        
         return cls(
             name=config_dict['name'],
             overwrite=config_dict.get('overwrite', False),
@@ -91,7 +102,8 @@ class Config:
             model=ModelConfig(**config_dict['model']),
             training=TrainingConfig(**training_config, epochs=epochs),
             logging=LoggingConfig(**config_dict['logging']),
-            system=SystemConfig(**config_dict['system'])
+            system=SystemConfig(**config_dict['system']),
+            resume=resume_config
         )
 
 class CheckpointManager:
@@ -113,6 +125,14 @@ class CheckpointManager:
         checkpoint_dir.mkdir(exist_ok=True)
         
         return run_dir, run_dir / 'log.txt', checkpoint_dir
+        
+    @staticmethod
+    def get_checkpoint_paths(checkpoint_path: str) -> tuple[str, str, str]:
+        """Returns the paths for model, optimizer, and state files"""
+        model_path = f"{checkpoint_path}_model.safetensors"
+        optimizer_path = f"{checkpoint_path}_optimizer.safetensors"
+        state_path = f"{checkpoint_path}_state.json"
+        return model_path, optimizer_path, state_path
 
 class TokenizerManager:
     def __init__(self, config: DataConfig, run_dir: Optional[Path] = None):
@@ -358,8 +378,12 @@ class Trainer:
         self.config = Config.from_yaml(config_path)
         self.config_path = config_path
         
+        # Initialize tracking variables
+        self.total_tokens = 0
+        self.start_step = 0
+        
         # Validate unique run name before proceeding
-        if for_training and not self.config.overwrite:
+        if for_training and not self.config.overwrite and not (self.config.resume and self.config.resume.checkpoint):
             CheckpointManager.validate_unique_name(self.config.name)
         
         self.setup_system()
@@ -549,9 +573,26 @@ class Trainer:
         return avg_loss
 
     def save_checkpoint(self, step: int | str, val_loss: float = None):
+        # Save model weights
         weights = dict(tree_flatten(self.model.parameters()))
-        checkpoint_path = self.checkpoint_dir / f'step_{step}.safetensors'
-        mx.save_safetensors(str(checkpoint_path), weights)
+        model_path = self.checkpoint_dir / f'step_{step}_model.safetensors'
+        mx.save_safetensors(str(model_path), weights)
+        
+        # Save optimizer state
+        optimizer_state = dict(tree_flatten(self.optimizer.state))
+        optimizer_path = self.checkpoint_dir / f'step_{step}_optimizer.safetensors'
+        mx.save_safetensors(str(optimizer_path), optimizer_state)
+        
+        # Save training state
+        training_state = {
+            'step': step if isinstance(step, int) else self.total_steps,
+            'val_ptr': self.data_manager.val_ptr,
+            'total_tokens': self.total_tokens.item(),
+            'validation_losses': self.validation_losses,
+        }
+        state_path = self.checkpoint_dir / f'step_{step}_state.json'
+        with open(state_path, 'w') as f:
+            json.dump(training_state, f)
         
         # Update metadata with checkpoint info
         metadata_path = self.run_dir / 'metadata.json'
@@ -564,7 +605,11 @@ class Trainer:
         checkpoint_info = {
             'step': step,
             'timestamp': datetime.now().isoformat(),
-            'path': f'checkpoints/step_{step}.safetensors'
+            'paths': {
+                'model': f'checkpoints/step_{step}_model.safetensors',
+                'optimizer': f'checkpoints/step_{step}_optimizer.safetensors',
+                'state': f'checkpoints/step_{step}_state.json'
+            }
         }
         
         # Include validation loss if available
@@ -612,34 +657,90 @@ class Trainer:
             
         return " | ".join(metrics)
 
+    def load_checkpoint(self, checkpoint_path: str, reset_optimizer: bool = False):
+        """Load a checkpoint and restore model, optimizer, and training state"""
+        # Extract step from checkpoint path
+        step_str = checkpoint_path.split('step_')[-1]
+        
+        # Get checkpoint file paths
+        model_path, optimizer_path, state_path = CheckpointManager.get_checkpoint_paths(checkpoint_path)
+        
+        # Load model weights
+        print(f"Loading model weights from {model_path}")
+        #weights = mx.load(model_path)
+        self.model.load_weights(model_path)
+        # Load optimizer state if not resetting
+        if not reset_optimizer:
+            print(f"Loading optimizer state from {optimizer_path}")
+            state_dict = mx.load(optimizer_path)
+            state = tree_unflatten(list(state_dict.items()))
+            self.optimizer.state = state
+        
+        # Load training state
+        print(f"Loading training state from {state_path}")
+        with open(state_path, 'r') as f:
+            training_state = json.load(f)
+        
+        # Restore training state
+        self.start_step = training_state['step'] if isinstance(training_state['step'], int) else 0
+        self.data_manager.val_ptr = training_state['val_ptr']
+        self.total_tokens = training_state['total_tokens']
+        self.validation_losses = training_state['validation_losses']
+        
+        print(f"Resumed training from checkpoint {checkpoint_path} at step {self.start_step}")
+        
+        return self.start_step
+
     def train(self):
-        total_tokens = 0
+        # Initialize variables
+        total_tokens = self.total_tokens
+        start_step = 0
+        
+        # Check if resuming from checkpoint
+        if self.config.resume and self.config.resume.checkpoint:
+            checkpoint_path = self.config.resume.checkpoint
+            reset_optimizer = self.config.resume.reset_optimizer
+            start_step = self.load_checkpoint(checkpoint_path, reset_optimizer)
+            
+            # If we're resuming, we should skip the initial validation
+            skip_initial_validation = True
+        else:
+            skip_initial_validation = False
+            
         loss_value_and_grad = nn.value_and_grad(self.model, self.compute_loss)
         start_time = time.time()
-        
-        # Create progress bar
-        progress_bar = tqdm(range(self.total_steps), desc="Training")
+        # Create progress bar with adjusted range for resuming
+        progress_bar = tqdm(range(self.total_steps), desc="Training", initial=start_step)
+
         
         # Initialize logging
-        with open(self.log_file, 'w') as log_file:
-            log_file.write(f"Training started at {datetime.now()}\n")
-            log_file.write(f"Total steps: {self.total_steps}\n")
-            if self.config.training.epochs is not None:
-                log_file.write(f"Training for {self.config.training.epochs} epochs with {self.steps_per_epoch} steps per epoch\n")
-            if self.data_manager.has_validation_data:
-                log_file.write(f"Validation data: {self.config.data.validation_file}\n")
-                log_file.write(f"Validation batches: {self.data_manager.num_validation_batches}\n")
-            log_file.write("=" * 50 + "\n\n")
+        with open(self.log_file, 'a' if start_step > 0 else 'w') as log_file:
+            if start_step == 0:
+                log_file.write(f"Training started at {datetime.now()}\n")
+                log_file.write(f"Total steps: {self.total_steps}\n")
+                if self.config.training.epochs is not None:
+                    log_file.write(f"Training for {self.config.training.epochs} epochs with {self.steps_per_epoch} steps per epoch\n")
+                if self.data_manager.has_validation_data:
+                    log_file.write(f"Validation data: {self.config.data.validation_file}\n")
+                    log_file.write(f"Validation batches: {self.data_manager.num_validation_batches}\n")
+                log_file.write("=" * 50 + "\n\n")
+            else:
+                log_file.write(f"\nResuming training at step {start_step} at {datetime.now()}\n")
+                log_file.write(f"Remaining steps: {self.total_steps - start_step}\n")
+                log_file.write("=" * 50 + "\n\n")
             
-            # Log initial validation loss if validation data is available
+            # Log initial validation loss if validation data is available and not resuming
             val_loss = None
-            if self.validation_steps > 0 and self.data_manager.has_validation_data:
+            if self.validation_steps > 0 and self.data_manager.has_validation_data and not skip_initial_validation:
                 val_loss = self.validate()
                 log_file.write(f"Initial validation loss: {val_loss:.4e} (ppl={np.exp(val_loss):.2f})\n\n")
                 # Add to validation loss history
                 self.validation_losses.append((0, val_loss))
             
             for step in progress_bar:
+                step += start_step
+                if step >= self.total_steps:
+                    break
                 # Generate batch
                 batch = self.data_manager.generate_batch(step)
                 
@@ -690,6 +791,8 @@ class Trainer:
                 if (1 + step) % self.config.logging.steps['checkpoint_interval'] == 0:
                     # Find the most recent validation loss if available
                     last_val_loss = val_loss if val_loss is not None else None
+                    # Update total_tokens in the trainer instance for checkpoint saving
+                    self.total_tokens = total_tokens
                     self.save_checkpoint(step + 1, last_val_loss)
         
         # Final validation
@@ -699,6 +802,7 @@ class Trainer:
             self.validation_losses.append((self.total_steps, final_val_loss))
         
         # Save final checkpoint with validation loss
+        self.total_tokens = total_tokens
         self.save_checkpoint("final", final_val_loss)
         
         # Save validation losses to metadata

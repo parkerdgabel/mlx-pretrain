@@ -60,7 +60,8 @@ Thumbs.db
 !train.jsonl
 !val.jsonl
 !validation_test_set.jsonl
-
+CLAUDE.md
+*.jsonl
 # Logs
 *.log
 logs/
@@ -73,3 +74,12 @@ logs/
 .idea/
 *.swp
 *.swo
+
+MLX-Llama-*/*
+evals/*
+runs/*
+tokenizer/*
+MLX-Llama-*/
+evals/
+runs/
+tokenizer/

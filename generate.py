@@ -33,9 +33,11 @@ def main():
     trainer = Trainer(str(config_path), for_training=False)
     
     # Load the final checkpoint
-    checkpoint_path = Path('runs') / args.run / 'checkpoints' / 'step_final.safetensors'
+    checkpoint_path = Path('runs') / args.run / 'checkpoints' / 'step_final_model.safetensors'
     if not checkpoint_path.exists():
-        raise ValueError(f"Final checkpoint not found for run: {args.run}")
+        checkpoint_path = Path('runs') / args.run / 'checkpoints' / 'step_final.safetensors'
+        if not checkpoint_path.exists():
+            raise ValueError(f"Final checkpoint not found for run: {args.run}")
     checkpoint_path = str(checkpoint_path)
     
     trainer.model.load_weights(checkpoint_path)
