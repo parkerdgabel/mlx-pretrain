@@ -31,12 +31,12 @@ Now, we will first train a tokenizer on the dataset. This is a simple BPE tokeni
 python train-tokenizer.py --config tokenizer-config-sample.yaml
 ```
 
-This will create a `tokenizer` directory with a `tokenizer.json` file inside. 
+This will create a `tokenizer` directory with a `tokenizer.json` file inside (This should take 5-15 minutes).
 
 Now, we can train the toy model, simply run:
 
 ```bash
-python train.py --config tokenizer-config-sample.yaml
+python train.py --config model-config-sample.yaml
 ```
 
 This will train a 2M parameter Llama Model on 200M tokens of Fineweb-Edu. This will take around 2 hours on an M3 Max. If you wish to shorten the training time, modify (in the config file):
