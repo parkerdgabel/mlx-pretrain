@@ -110,3 +110,6 @@ You should see:
 Which shows the model get ~31% accuracy on ARC-Easy - which surpasses the random baseline of 25% and shows our model did actually learn something.
 
 Now that you have the MLX-LM model, you can proceed as you wish - upload it to HuggingFace, use it locally for evaluation purposes, etc.
+
+# Related Projects
+@arthurcolle's [MLX + Cuda Pretraining](https://github.com/arthurcolle/mlx-cuda-distributed-pretraining/tree/muon)
