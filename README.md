@@ -14,6 +14,9 @@
     pip install -r requirements.txt
     ```
 
+
+Make sure to use python 3.10 or 3.11 - 3.13 causes issues with `sentencepiece`.
+
 ## Training a Toy Model
 
 Download the toy dataset - 200M tokens of Fineweb-Edu (and a validation set):
