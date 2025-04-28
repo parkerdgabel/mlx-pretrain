@@ -1,0 +1,85 @@
+name: "Llama-2M-RL"
+overwrite: true
+data:
+  input_file: "rl_data.jsonl"
+  # Optional validation file
+  validation_file: "rl_val.jsonl"
+  # Path to tokenizer from pretraining
+  tokenizer_path: "runs/Llama-2M-SFT/tokenizer"
+  
+  # RL specific configuration
+  prompt_format: "### Instruction:\n{instruction}\n\n### Response:"
+  response_format: "{response}"
+  system_prompt: "You are a helpful, harmless, and honest AI assistant."
+  input_field: "instruction"
+  output_field: "response"
+  reward_field: "reward"
+  
+  # PPO specific parameters
+  ppo_epochs: 4
+  ppo_mini_batch_size: 8
+  kl_coef: 0.1
+  clip_range: 0.2
+  
+  preprocessing:
+    max_context_size: 1024
+    
+model:
+  # Use the same architecture as the pretrained model
+  architecture: "llama"
+  dimensions:
+    hidden_size: 2048
+    intermediate_size: 4096
+    num_layers: 12
+  attention:
+    num_heads: 8
+    num_kv_heads: null
+    head_dim: null
+    max_position_embeddings: null
+  normalization:
+    rms_norm_eps: 1.0e-5
+  rope:
+    theta: 10000
+    traditional: false
+    scaling: null
+  misc:
+    attention_bias: false
+    mlp_bias: false
+    tie_word_embeddings: true
+
+training:
+  # Number of epochs to train for
+  epochs: 3
+  hyperparameters:
+    batch_size: 8
+    learning_rate: 2.0e-5  # Lower learning rate for RL
+    weight_decay: 0.01
+    gradient_clip: 1.0  # Add gradient clipping for stability
+    
+  scheduler:
+    type: "cosine_with_warmup"  # Options: linear, cosine, cosine_with_warmup
+    min_lr_ratio: 0.1
+    warmup_ratio: 0.1  # 10% of steps for warmup
+    
+  optimization:
+    optimizer: "adamw"  # Options: adam, adamw, muon, sgd
+
+logging:
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+  steps:
+    logging_interval: 10
+    checkpoint_interval: 500
+    validation_interval: 100  # Run validation every 100 steps
+  metrics:
+    log_loss: true
+    log_perplexity: false  # Not applicable for RL
+    log_tokens_per_second: true
+    log_learning_rate: true
+    log_tokens_processed: true
+    log_rewards: true  # RL specific metric
+    log_kl_divergence: true  # RL specific metric
+
+system:
+  seed: 42
+  device: "gpu"  # Options: cpu, gpu

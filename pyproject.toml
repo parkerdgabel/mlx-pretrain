@@ -1,0 +1,26 @@
+[project]
+name = "mlx-pretrain"
+version = "0.1.0"
+description = "Pretraining for MLX"
+requires-python = "<3.12.9, >=3.10.0"
+dependencies = [
+    "matplotlib==3.10.1",
+    "mlx==0.25.0",
+    "mlx_lm==0.23.2",
+    "mlx_optimizers==0.4.1",
+    "numpy==2.2.5",
+    "PyYAML==6.0.2",
+    "tokenizers==0.21.1",
+    "tqdm==4.67.1",
+    "datasets",
+    "lm_eval",
+    "hf_xet"
+]
+
+#[project.scripts]
+#train = "train.py:main"
+#tokenizer-train = "train-tokenizer.py:main"
+#
+#[build-system]
+#requires = ["setuptools", "wheel"]
+#build-backend = "setuptools.build_meta"
