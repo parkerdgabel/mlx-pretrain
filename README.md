@@ -6,6 +6,7 @@ MLX-Pretrain is a library for training and fine-tuning language models using App
 
 - [Supervised Fine-Tuning (SFT)](#supervised-fine-tuning-sft-with-mlx-pretrain)
 - [Reinforcement Learning (RL)](#reinforcement-learning-with-mlx-pretrain)
+- [Vision-Language Models](#vision-language-models-with-mlx-pretrain)
 
 # Supervised Fine-Tuning (SFT) with MLX-Pretrain
 
@@ -51,17 +52,17 @@ data:
   input_file: "sft_data.jsonl"
   validation_file: "sft_val.jsonl"
   tokenizer_path: "runs/Llama (2M)/tokenizer"
-  
+
   # SFT specific configuration
   prompt_format: "### Instruction:\n{instruction}\n\n### Response:"
   response_format: "{response}"
   system_prompt: "You are a helpful, harmless, and honest AI assistant."
   input_field: "instruction"
   output_field: "response"
-  
+
   preprocessing:
     max_context_size: 1024
-    
+
 model:
   architecture: "llama"
   dimensions:
@@ -194,7 +195,7 @@ data:
   prompt_format: "### Instruction:\n{instruction}\n\n### Response:"
   response_format: "{response}"
   reward_field: "reward"
-  
+
   # PPO specific parameters
   ppo_epochs: 4
   ppo_mini_batch_size: 8
@@ -252,3 +253,223 @@ These metrics are saved to the run directory and can be visualized using the plo
 1. Pretrain a base model: `python train.py --config model-config.yaml`
 2. Fine-tune with SFT: `python sft.py --config sft-config.yaml --pretrained_model "runs/Llama (2M)"`
 3. Fine-tune with RL: `python rl.py --config rl-config.yaml --pretrained_model "runs/Llama-2M-SFT"`
+
+# Vision-Language Models with MLX-Pretrain
+
+This section explains how to train and fine-tune vision-language models (VLMs) using MLX-Pretrain.
+
+## Overview
+
+Vision-Language Models combine visual and textual understanding, allowing models to process both images and text. MLX-Pretrain now supports training and fine-tuning of VLMs with sophisticated multimodal loss functions.
+
+## Prerequisites
+
+Before training a vision-language model, you should:
+
+1. Have a pretrained vision-language model (from mlx_vlm or another compatible source)
+2. Prepare your training data with both text and image paths
+3. Create a configuration file that enables vision-language features
+
+## Data Preparation
+
+For vision-language models, your JSONL data should include both text and image paths:
+
+```json
+{"text": "A photo of a cat sitting on a windowsill", "images": ["path/to/cat_image.jpg"]}
+{"text": "Two dogs playing in the park", "images": ["path/to/dogs_image.jpg"]}
+```
+
+For multi-image examples:
+
+```json
+{"text": "Compare these two images", "images": ["path/to/image1.jpg", "path/to/image2.jpg"]}
+```
+
+## Configuration
+
+Create a YAML configuration file with vision-language specific settings:
+
+```yaml
+name: "VLM-Training"
+overwrite: true
+data:
+  input_file: "vlm_data.jsonl"
+  validation_file: "vlm_val.jsonl"
+  tokenizer_path: "path/to/tokenizer"
+
+  # Vision-language specific configuration
+  is_vision_language: true
+  image_field: "images"
+  text_field: "text"
+  image_processor_path: "path/to/image/processor"  # Optional
+  max_images_per_sample: 5  # Maximum number of images per sample
+
+  # Multimodal loss configuration
+  multimodal_loss:
+    lm_loss_weight: 1.0                # Weight for language modeling loss
+    enable_contrastive_loss: true      # Enable contrastive loss
+    contrastive_loss_weight: 0.5       # Weight for contrastive loss
+    contrastive_loss_temperature: 0.07 # Temperature for contrastive loss
+    enable_matching_loss: true         # Enable image-text matching loss
+    matching_loss_weight: 0.3          # Weight for matching loss
+    verbose_loss_logging: true         # Enable verbose logging of loss components
+
+  preprocessing:
+    max_context_size: 1024
+
+model:
+  architecture: "qwen2_vl"  # Vision-language model architecture
+  dimensions:
+    hidden_size: 2048
+    intermediate_size: 4096
+    num_layers: 12
+  # Additional model parameters...
+
+  # LoRA/QLoRA configuration for efficient fine-tuning
+  lora:
+    rank: 8                      # Rank of the LoRA matrices
+    alpha: 16                    # Scaling factor for LoRA matrices
+    dropout: 0.05                # Dropout rate for LoRA layers
+    target_modules: ["q_proj", "v_proj"]  # Modules to apply LoRA to
+
+    # QLoRA specific parameters (optional)
+    use_qlora: true              # Enable QLoRA (quantized LoRA)
+    qlora_bits: 4                # Number of bits for quantization (4 or 8)
+    qlora_group_size: 64         # Group size for quantization
+
+training:
+  epochs: 3
+  hyperparameters:
+    batch_size: 4  # Smaller batch size due to memory requirements
+    learning_rate: 2.0e-5
+    weight_decay: 0.01
+    gradient_clip: 1.0
+  # Additional training parameters...
+```
+
+## Multimodal Loss Functions
+
+MLX-Pretrain supports several loss functions specifically designed for vision-language models:
+
+1. **Language Modeling Loss**: Standard cross-entropy loss on text tokens (always enabled)
+2. **Contrastive Loss**: Aligns image and text representations in the embedding space
+3. **Image-Text Matching Loss**: Helps the model determine if an image and text pair match
+
+You can configure these loss functions using the `multimodal_loss` section in your configuration file.
+
+## Evaluation Metrics for Vision-Language Models
+
+MLX-Pretrain now supports comprehensive evaluation metrics for vision-language models:
+
+### Available Metrics
+
+1. **Image-Text Retrieval Metrics**:
+   - **Recall@K**: Measures the percentage of times the correct image/text is retrieved within the top K results
+   - **Mean Recall**: Average of image-to-text and text-to-image retrieval performance
+
+2. **Visual Question Answering Metrics** (placeholder implementation):
+   - **VQA Accuracy**: Measures the accuracy of answers to visual questions
+
+3. **Image Captioning Metrics** (placeholder implementation):
+   - **BLEU Score**: Measures the quality of generated captions
+
+4. **Zero-Shot Classification Metrics** (placeholder implementation):
+   - **Classification Accuracy**: Measures the accuracy of zero-shot classification
+
+### Configuration
+
+Enable and configure evaluation metrics in your YAML configuration file:
+
+```yaml
+data:
+  # Other data configuration...
+
+  # Vision-language evaluation metrics configuration
+  vlm_evaluation:
+    enable_retrieval_metrics: true      # Enable image-text retrieval metrics
+    retrieval_k_values: [1, 5, 10]      # K values for Recall@K metrics
+    enable_vqa_metrics: false           # Enable visual question answering metrics
+    enable_captioning_metrics: false    # Enable image captioning metrics
+    enable_classification_metrics: false # Enable zero-shot classification metrics
+    classification_categories: []        # Categories for zero-shot classification
+    verbose_metrics_logging: true       # Enable verbose logging of metrics
+```
+
+### Interpreting Results
+
+During training, validation metrics will be logged alongside the standard loss metrics:
+
+```
+Step 1000 validation: val_loss=2.345e-01 | val_ppl=1.26
+Step 1000 validation metrics: i2t_recall@1=0.4500, t2i_recall@1=0.4200, mean_recall@1=0.4350, i2t_recall@5=0.7800, t2i_recall@5=0.7500, mean_recall@5=0.7650
+```
+
+The metrics are also saved in the run's metadata and can be visualized or analyzed after training.
+
+## Running Vision-Language Training
+
+To start training a vision-language model:
+
+```bash
+python train.py --config vlm-config.yaml
+```
+
+For fine-tuning:
+
+```bash
+python sft.py --config vlm-sft-config.yaml --pretrained_model "path/to/pretrained/vlm"
+```
+
+## Model Compatibility
+
+MLX-Pretrain supports vision-language models from:
+
+1. Custom architectures in the `arch` directory
+2. Models from the `mlx_lm` package
+3. Models from the `mlx_vlm` package
+
+### Model Source Selection
+
+MLX-Pretrain now supports explicitly selecting the source of your model architecture:
+
+- **custom**: Models defined in the `arch` directory
+- **mlx_lm**: Models from the `mlx_lm` package
+- **mlx_vlm**: Vision-language models from the `mlx_vlm` package
+
+You can specify the model source in your configuration file:
+
+```yaml
+model:
+  architecture: "llama"
+  model_source: "mlx_lm"  # Use "custom", "mlx_lm", or "mlx_vlm"
+  dimensions:
+    hidden_size: 2048
+    # ...
+```
+
+If `model_source` is not specified, MLX-Pretrain will try to load the model from each source in the following order:
+1. Custom models from the `arch` directory
+2. Models from `mlx_lm`
+3. Models from `mlx_vlm`
+
+## Tips for Effective Vision-Language Training
+
+1. **Use appropriate batch sizes**: Vision-language models require more memory, so you may need to reduce batch size.
+2. **Balance loss components**: Adjust the weights of different loss components to achieve the best performance.
+3. **Use LoRA or QLoRA for efficient fine-tuning**: 
+   - LoRA allows efficient adaptation of large vision-language models with fewer parameters.
+   - QLoRA (Quantized LoRA) further reduces memory requirements by quantizing the base model weights.
+   - For very large models, enable QLoRA with `use_qlora: true` in your configuration.
+4. **Monitor individual loss components**: Use `verbose_loss_logging: true` to track how each loss component evolves.
+5. **Ensure image diversity**: Include a variety of images to help the model generalize across different visual concepts.
+6. **Consider memory-performance tradeoffs**: 
+   - Adjust QLoRA parameters (`qlora_bits` and `qlora_group_size`) to balance memory usage and model quality.
+   - Lower bit precision (4-bit) saves more memory but may slightly impact performance.
+
+## Example Workflow
+
+1. Prepare vision-language data with text and image paths
+2. Create a configuration file with vision-language settings
+3. Train or fine-tune the model using the appropriate script
+4. Monitor the individual loss components during training
+5. Evaluate the model on vision-language tasks

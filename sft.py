@@ -251,20 +251,56 @@ class SFTTrainer:
         model_cfg = self.config.model
         arch_file = f"arch.{model_cfg.architecture}"
         mlx_lm_file = f"mlx_lm.models.{model_cfg.architecture}"
+        mlx_vlm_file = f"mlx_vlm.models.{model_cfg.architecture}"
         Model = None
         ModelArgs = None
+        is_vlm_model = False
 
-        try:
-            module = importlib.import_module(arch_file)
-            Model = getattr(module, 'Model')
-            ModelArgs = getattr(module, 'ModelArgs')
-        except ImportError:
+        # Check if model_source is specified
+        if model_cfg.model_source:
+            if model_cfg.model_source == "custom":
+                try:
+                    module = importlib.import_module(arch_file)
+                    Model = getattr(module, 'Model')
+                    ModelArgs = getattr(module, 'ModelArgs')
+                except ImportError:
+                    raise ImportError(f"Custom model architecture '{model_cfg.architecture}' not found in {arch_file}")
+            elif model_cfg.model_source == "mlx_lm":
+                try:
+                    module = importlib.import_module(mlx_lm_file)
+                    Model = getattr(module, 'Model')
+                    ModelArgs = getattr(module, 'ModelArgs')
+                except ImportError:
+                    raise ImportError(f"MLX-LM model architecture '{model_cfg.architecture}' not found in {mlx_lm_file}")
+            elif model_cfg.model_source == "mlx_vlm":
+                try:
+                    module = importlib.import_module(mlx_vlm_file)
+                    Model = getattr(module, 'Model')
+                    ModelArgs = getattr(module, 'ModelArgs')
+                    is_vlm_model = True
+                except ImportError:
+                    raise ImportError(f"MLX-VLM model architecture '{model_cfg.architecture}' not found in {mlx_vlm_file}")
+            else:
+                raise ValueError(f"Invalid model_source: {model_cfg.model_source}. Must be 'custom', 'mlx_lm', or 'mlx_vlm'")
+        else:
+            # Fallback to the original behavior if model_source is not specified
             try:
-                module = importlib.import_module(mlx_lm_file)
+                module = importlib.import_module(arch_file)
                 Model = getattr(module, 'Model')
                 ModelArgs = getattr(module, 'ModelArgs')
             except ImportError:
-                raise ImportError(f"Model architecture '{model_cfg.architecture}' not found in both {arch_file} and {mlx_lm_file}")
+                try:
+                    module = importlib.import_module(mlx_lm_file)
+                    Model = getattr(module, 'Model')
+                    ModelArgs = getattr(module, 'ModelArgs')
+                except ImportError:
+                    try:
+                        module = importlib.import_module(mlx_vlm_file)
+                        Model = getattr(module, 'Model')
+                        ModelArgs = getattr(module, 'ModelArgs')
+                        is_vlm_model = True
+                    except ImportError:
+                        raise ImportError(f"Model architecture '{model_cfg.architecture}' not found in {arch_file}, {mlx_lm_file}, or {mlx_vlm_file}")
 
         all_args = {
             'model_type': model_cfg.architecture,
@@ -318,6 +354,72 @@ class SFTTrainer:
                 print(f"Loading pretrained weights from {pretrained_path}")
                 weights = mx.load(str(pretrained_path))
                 self.model.update(weights)
+
+        # Apply LoRA/QLoRA if enabled for vision-language models
+        if is_vlm_model and self.config.data.is_vision_language and model_cfg.lora is not None:
+            try:
+                # Import LoRA functions from mlx_vlm
+                from mlx_vlm.lora import apply_lora_layers
+
+                # Get LoRA configuration
+                lora_cfg = model_cfg.lora
+                lora_rank = lora_cfg.get('rank', 8)
+                lora_alpha = lora_cfg.get('alpha', 16)
+                lora_dropout = lora_cfg.get('dropout', 0.05)
+                target_modules = lora_cfg.get('target_modules', ['q_proj', 'v_proj'])
+
+                # Check if QLoRA is enabled
+                use_qlora = lora_cfg.get('use_qlora', False)
+                qlora_bits = lora_cfg.get('qlora_bits', 4)
+                qlora_group_size = lora_cfg.get('qlora_group_size', 64)
+
+                if use_qlora:
+                    try:
+                        # Try to import quantization functions
+                        from mlx_vlm.lora import apply_qlora_layers
+
+                        # Apply QLoRA to the model
+                        print(f"Applying QLoRA with rank={lora_rank}, alpha={lora_alpha}, bits={qlora_bits}, group_size={qlora_group_size}")
+                        self.model = apply_qlora_layers(
+                            self.model,
+                            rank=lora_rank,
+                            alpha=lora_alpha,
+                            dropout=lora_dropout,
+                            target_modules=target_modules,
+                            bits=qlora_bits,
+                            group_size=qlora_group_size
+                        )
+                        print("QLoRA applied successfully")
+                    except (ImportError, AttributeError) as e:
+                        print(f"Warning: Could not apply QLoRA - {e}")
+                        print("Falling back to standard LoRA")
+
+                        # Fall back to standard LoRA
+                        print(f"Applying LoRA with rank={lora_rank}, alpha={lora_alpha}")
+                        self.model = apply_lora_layers(
+                            self.model,
+                            rank=lora_rank,
+                            alpha=lora_alpha,
+                            dropout=lora_dropout,
+                            target_modules=target_modules
+                        )
+                        print("LoRA applied successfully")
+                else:
+                    # Apply standard LoRA to the model
+                    print(f"Applying LoRA with rank={lora_rank}, alpha={lora_alpha}")
+                    self.model = apply_lora_layers(
+                        self.model,
+                        rank=lora_rank,
+                        alpha=lora_alpha,
+                        dropout=lora_dropout,
+                        target_modules=target_modules
+                    )
+                    print("LoRA applied successfully")
+            except ImportError as e:
+                print(f"Warning: Could not apply LoRA/QLoRA - {e}")
+                print("Make sure you have the latest version of mlx_vlm installed")
+            except Exception as e:
+                print(f"Error applying LoRA/QLoRA: {e}")
 
         # Log model size
         p = sum(v.size for _, v in tree_flatten(self.model.trainable_parameters())) / 10**6
