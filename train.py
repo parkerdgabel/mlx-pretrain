@@ -25,9 +25,9 @@ def filter_valid_args(cls, arg_dict):
 
 @dataclass
 class DataConfig:
-    input_file: str
-    preprocessing: Dict[str, int]
-    tokenizer: Dict[str, Any]
+    input_file: Optional[str] = None
+    preprocessing: Dict[str, int] = None
+    tokenizer: Dict[str, Any] = None
     tokenizer_path: Optional[str] = None  # Path to a directory containing a tokenizer.json file
     validation_file: Optional[str] = None
     weight_path: Optional[str] = None
@@ -37,6 +37,12 @@ class DataConfig:
     text_field: Optional[str] = "text"  # Field name for text in the input data
     image_processor_path: Optional[str] = None  # Path to image processor for vision-language models
     max_images_per_sample: int = 1  # Maximum number of images per sample
+    # Fields for Hugging Face datasets
+    hf_dataset_name: Optional[str] = None  # Name of the Hugging Face dataset
+    hf_dataset_config: Optional[str] = None  # Configuration name for the dataset
+    hf_train_split: Optional[str] = "train"  # Training split name
+    hf_val_split: Optional[str] = "validation"  # Validation split name
+    use_streaming: bool = False  # Whether to use streaming mode for the dataset
     # Multimodal loss configuration
     # Example configuration:
     # multimodal_loss:
@@ -506,6 +512,19 @@ class DataManager:
         self.train_idx = None
         self.val_idx = None
         self.batch_size = batch_size
+        self.hf_train_dataset = None
+        self.hf_val_dataset = None
+        self.using_hf_dataset = False
+
+        # Check if we need to import datasets library
+        if self.config.hf_dataset_name:
+            try:
+                from datasets import load_dataset
+                self.load_dataset = load_dataset
+                self.using_hf_dataset = True
+            except ImportError:
+                raise ImportError("The 'datasets' library is required for Hugging Face datasets. "
+                                 "Please install it using: pip install datasets")
 
         # Initialize image processor for vision-language models
         self.image_processor = None
@@ -530,8 +549,20 @@ class DataManager:
         self.load_data()
 
     def load_data(self):
-        # Load training data
-        self._load_file(self.config.input_file, self.train_docs)
+        if self.using_hf_dataset:
+            # Load data from Hugging Face dataset
+            self._load_hf_dataset()
+        else:
+            # Load data from files
+            if not self.config.input_file:
+                raise ValueError("input_file must be specified when not using Hugging Face datasets")
+
+            # Load training data
+            self._load_file(self.config.input_file, self.train_docs)
+
+            # Load validation data if specified
+            if self.config.validation_file:
+                self._load_file(self.config.validation_file, self.val_docs)
 
         # Set up training batches
         self.train_idx = sorted(range(len(self.train_docs)), key=lambda idx: len(self.train_docs[idx]))
@@ -542,11 +573,8 @@ class DataManager:
         ]
         self.train_indices = np.random.permutation(len(self.train_batch_idx))
 
-        # Load validation data if specified
-        if self.config.validation_file:
-            self._load_file(self.config.validation_file, self.val_docs)
-
-            # Set up validation batches
+        # Set up validation batches if we have validation data
+        if self.val_docs:
             self.val_idx = sorted(range(len(self.val_docs)), key=lambda idx: len(self.val_docs[idx]))
             self.val_batch_idx = [
                 self.val_idx[i : i + self.batch_size : 1]
@@ -554,6 +582,101 @@ class DataManager:
             ]
             self.val_indices = np.random.permutation(len(self.val_batch_idx))
             self.val_ptr = 0  # Pointer for validation batches
+
+    def _load_hf_dataset(self):
+        """Load data from Hugging Face dataset."""
+        print(f"Loading Hugging Face dataset: {self.config.hf_dataset_name}")
+
+        # Load the dataset
+        dataset = self.load_dataset(
+            self.config.hf_dataset_name,
+            self.config.hf_dataset_config,
+            streaming=self.config.use_streaming
+        )
+
+        # Check available splits
+        available_splits = list(dataset.keys())
+        print(f"Available splits: {available_splits}")
+
+        # Verify train split exists
+        if self.config.hf_train_split not in available_splits:
+            raise ValueError(f"Training split '{self.config.hf_train_split}' not found. Available splits: {available_splits}")
+
+        # Get training data
+        train_dataset = dataset[self.config.hf_train_split]
+
+        # Process training data
+        if self.config.use_streaming:
+            # For streaming datasets, we'll process examples on-the-fly
+            self.hf_train_dataset = train_dataset
+            # Load a small batch to initialize train_docs for batch creation
+            for i, example in enumerate(train_dataset):
+                self._process_hf_example(example, self.train_docs)
+                if i >= 100:  # Load just enough examples to set up batches
+                    break
+        else:
+            # For regular datasets, process all examples now
+            for example in train_dataset:
+                self._process_hf_example(example, self.train_docs)
+
+        # Get validation data if available
+        if self.config.hf_val_split and self.config.hf_val_split in available_splits:
+            val_dataset = dataset[self.config.hf_val_split]
+
+            if self.config.use_streaming:
+                # For streaming datasets, we'll process examples on-the-fly
+                self.hf_val_dataset = val_dataset
+                # Load a small batch to initialize val_docs for batch creation
+                for i, example in enumerate(val_dataset):
+                    self._process_hf_example(example, self.val_docs)
+                    if i >= 100:  # Load just enough examples to set up batches
+                        break
+            else:
+                # For regular datasets, process all examples now
+                for example in val_dataset:
+                    self._process_hf_example(example, self.val_docs)
+
+        print(f"Loaded {len(self.train_docs)} training examples and {len(self.val_docs)} validation examples")
+
+    def _process_hf_example(self, example, docs_list):
+        """Process a single example from a Hugging Face dataset."""
+        # Handle vision-language data
+        if self.config.is_vision_language:
+            # Get text from the specified field
+            text = example.get(self.config.text_field, "")
+
+            # Get image paths from the specified field
+            images = example.get(self.config.image_field, [])
+
+            # Ensure images is a list
+            if not isinstance(images, list):
+                images = [images]
+
+            # Limit number of images if needed
+            images = images[:self.config.max_images_per_sample]
+
+            # Create a sample with text and images
+            sample = {
+                "text": text,
+                "images": images
+            }
+
+            # Add the sample to the docs list
+            docs_list.append(sample)
+        else:
+            # Handle text-only data
+            text = example.get(self.config.text_field, "")
+            if not text:
+                return
+
+            chunk_size = self.config.preprocessing['max_context_size']
+            overlap = self.config.preprocessing.get('chunk_overlap', 0)
+
+            # Handle overlapping chunks if specified
+            stride = chunk_size - overlap
+            for i in range(0, len(text), stride):
+                chunk_text = text[i : i + chunk_size]
+                docs_list.append(chunk_text)
 
     def _load_file(self, file_path: str, docs_list: list):
         """Helper method to load documents from a file."""
@@ -598,17 +721,51 @@ class DataManager:
 
     def generate_batch(self, step: int) -> mx.array:
         """Generate a training batch."""
-        indices = self.train_batch_idx[self.train_indices[step % len(self.train_indices)]]
-        return self._create_batch([self.train_docs[i] for i in indices])
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_train_dataset:
+            # For streaming datasets, fetch examples on-the-fly
+            batch_docs = []
+            for _ in range(self.batch_size):
+                # Get next example from the streaming dataset
+                try:
+                    example = next(iter(self.hf_train_dataset))
+                    self._process_hf_example(example, batch_docs)
+                except StopIteration:
+                    # If we reach the end of the dataset, reset the iterator
+                    self.hf_train_dataset = self.hf_train_dataset.shuffle()
+                    example = next(iter(self.hf_train_dataset))
+                    self._process_hf_example(example, batch_docs)
+
+            return self._create_batch(batch_docs)
+        else:
+            # For regular datasets, use pre-loaded examples
+            indices = self.train_batch_idx[self.train_indices[step % len(self.train_indices)]]
+            return self._create_batch([self.train_docs[i] for i in indices])
 
     def generate_validation_batch(self, batch_idx: int) -> mx.array:
         """Generate a validation batch."""
-        if not self.config.validation_file or batch_idx >= len(self.val_batch_idx):
-            raise ValueError("No validation data available or batch index out of range")
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_val_dataset:
+            # For streaming datasets, fetch examples on-the-fly
+            batch_docs = []
+            for _ in range(self.batch_size):
+                # Get next example from the streaming dataset
+                try:
+                    example = next(iter(self.hf_val_dataset))
+                    self._process_hf_example(example, batch_docs)
+                except StopIteration:
+                    # If we reach the end of the dataset, reset the iterator
+                    self.hf_val_dataset = self.hf_val_dataset.shuffle()
+                    example = next(iter(self.hf_val_dataset))
+                    self._process_hf_example(example, batch_docs)
 
-        indices = self.val_batch_idx[self.val_indices[self.val_ptr % len(self.val_indices)]]
-        self.val_ptr += 1
-        return self._create_batch([self.val_docs[i] for i in indices])
+            return self._create_batch(batch_docs)
+        else:
+            # For regular datasets, use pre-loaded examples
+            if not self.val_docs or batch_idx >= len(self.val_batch_idx):
+                raise ValueError("No validation data available or batch index out of range")
+
+            indices = self.val_batch_idx[self.val_indices[self.val_ptr % len(self.val_indices)]]
+            self.val_ptr += 1
+            return self._create_batch([self.val_docs[i] for i in indices])
 
     def _create_batch(self, docs: list) -> Union[mx.array, Dict[str, Any]]:
         """Helper method to create and pad a batch from documents.
@@ -687,12 +844,26 @@ class DataManager:
     @property
     def has_validation_data(self) -> bool:
         """Check if validation data is available."""
-        return self.config.validation_file is not None and len(self.val_docs) > 0
+        if self.using_hf_dataset:
+            # For Hugging Face datasets, check if validation split is available
+            return self.hf_val_dataset is not None or len(self.val_docs) > 0
+        else:
+            # For file-based datasets, check if validation file is specified and loaded
+            return self.config.validation_file is not None and len(self.val_docs) > 0
 
     @property
     def num_validation_batches(self) -> int:
         """Get the number of validation batches."""
-        return len(self.val_batch_idx) if self.has_validation_data else 0
+        if not self.has_validation_data:
+            return 0
+
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_val_dataset:
+            # For streaming datasets, return a reasonable number of batches
+            # This is an estimate since we don't know the exact size of the dataset
+            return 100  # Arbitrary number, can be adjusted
+        else:
+            # For regular datasets, return the actual number of batches
+            return len(self.val_batch_idx) if hasattr(self, 'val_batch_idx') else 0
 
 class OptimizationManager:
     def __init__(self, config: TrainingConfig, num_training_steps: int):

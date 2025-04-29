@@ -40,12 +40,19 @@ from train import (
 
 @dataclass
 class SFTDataConfig:
-    input_file: str
+    input_file: Optional[str] = None
     validation_file: Optional[str] = None
     tokenizer_path: Optional[str] = None
     preprocessing: Dict[str, Any] = None
     tokenizer: Dict[str, Any] = None
     weight_path: Optional[str] = None
+
+    # Fields for Hugging Face datasets
+    hf_dataset_name: Optional[str] = None  # Name of the Hugging Face dataset
+    hf_dataset_config: Optional[str] = None  # Configuration name for the dataset
+    hf_train_split: Optional[str] = "train"  # Training split name
+    hf_val_split: Optional[str] = "validation"  # Validation split name
+    use_streaming: bool = False  # Whether to use streaming mode for the dataset
 
     # SFT specific fields
     prompt_format: str = "{instruction}"
@@ -97,6 +104,19 @@ class SFTDataManager:
         self.train_data = []
         self.val_data = []
         self.val_ptr = 0
+        self.hf_train_dataset = None
+        self.hf_val_dataset = None
+        self.using_hf_dataset = False
+
+        # Check if we need to import datasets library
+        if self.config.hf_dataset_name:
+            try:
+                from datasets import load_dataset
+                self.load_dataset = load_dataset
+                self.using_hf_dataset = True
+            except ImportError:
+                raise ImportError("The 'datasets' library is required for Hugging Face datasets. "
+                                 "Please install it using: pip install datasets")
 
         # Load preprocessing config
         self.max_context_size = config.preprocessing.get('max_context_size', 1024)
@@ -114,15 +134,111 @@ class SFTDataManager:
 
     def load_data(self):
         """Load training and validation data."""
-        print(f"Loading training data from {self.config.input_file}")
-        self._load_file(self.config.input_file, self.train_data)
+        if self.using_hf_dataset:
+            # Load data from Hugging Face dataset
+            self._load_hf_dataset()
+        else:
+            # Load data from files
+            if not self.config.input_file:
+                raise ValueError("input_file must be specified when not using Hugging Face datasets")
 
-        if self.config.validation_file:
-            print(f"Loading validation data from {self.config.validation_file}")
-            self._load_file(self.config.validation_file, self.val_data)
+            print(f"Loading training data from {self.config.input_file}")
+            self._load_file(self.config.input_file, self.train_data)
+
+            if self.config.validation_file:
+                print(f"Loading validation data from {self.config.validation_file}")
+                self._load_file(self.config.validation_file, self.val_data)
 
         print(f"Loaded {len(self.train_data)} training examples and {len(self.val_data)} validation examples")
         return len(self.train_data), len(self.val_data)
+
+    def _load_hf_dataset(self):
+        """Load data from Hugging Face dataset."""
+        print(f"Loading Hugging Face dataset: {self.config.hf_dataset_name}")
+
+        # Load the dataset
+        dataset = self.load_dataset(
+            self.config.hf_dataset_name,
+            self.config.hf_dataset_config,
+            streaming=self.config.use_streaming
+        )
+
+        # Check available splits
+        available_splits = list(dataset.keys())
+        print(f"Available splits: {available_splits}")
+
+        # Verify train split exists
+        if self.config.hf_train_split not in available_splits:
+            raise ValueError(f"Training split '{self.config.hf_train_split}' not found. Available splits: {available_splits}")
+
+        # Get training data
+        train_dataset = dataset[self.config.hf_train_split]
+
+        # Process training data
+        if self.config.use_streaming:
+            # For streaming datasets, we'll process examples on-the-fly
+            self.hf_train_dataset = train_dataset
+            # Load a small batch to initialize train_data for batch creation
+            for i, example in enumerate(train_dataset):
+                self._process_hf_example(example, self.train_data)
+                if i >= 100:  # Load just enough examples to set up batches
+                    break
+        else:
+            # For regular datasets, process all examples now
+            for example in train_dataset:
+                self._process_hf_example(example, self.train_data)
+
+        # Get validation data if available
+        if self.config.hf_val_split and self.config.hf_val_split in available_splits:
+            val_dataset = dataset[self.config.hf_val_split]
+
+            if self.config.use_streaming:
+                # For streaming datasets, we'll process examples on-the-fly
+                self.hf_val_dataset = val_dataset
+                # Load a small batch to initialize val_data for batch creation
+                for i, example in enumerate(val_dataset):
+                    self._process_hf_example(example, self.val_data)
+                    if i >= 100:  # Load just enough examples to set up batches
+                        break
+            else:
+                # For regular datasets, process all examples now
+                for example in val_dataset:
+                    self._process_hf_example(example, self.val_data)
+
+    def _process_hf_example(self, example, data_list):
+        """Process a single example from a Hugging Face dataset."""
+        try:
+            # Check if required fields exist
+            if self.output_field not in example:
+                return
+
+            if not self.input_field_optional and self.input_field not in example:
+                return
+
+            # Format the prompt and response
+            instruction = example.get(self.input_field, "")
+            response = example[self.output_field]
+
+            # Format according to templates
+            prompt = self.prompt_format.format(instruction=instruction)
+            if self.system_prompt:
+                prompt = f"{self.system_prompt}\n{prompt}"
+
+            formatted_response = self.response_format.format(response=response)
+
+            # Tokenize and add to data list
+            prompt_tokens = self.tokenizer.tokenize(prompt)
+            response_tokens = self.tokenizer.tokenize(formatted_response)
+
+            # Check if the combined length is within max context size
+            if len(prompt_tokens) + len(response_tokens) <= self.max_context_size:
+                data_list.append({
+                    "prompt": prompt_tokens,
+                    "response": response_tokens,
+                    "combined": prompt_tokens + response_tokens
+                })
+        except Exception as e:
+            print(f"Error processing example: {e}")
 
     def _load_file(self, file_path: str, data_list: list):
         """Load data from a JSONL file."""
@@ -165,20 +281,57 @@ class SFTDataManager:
 
     def generate_batch(self, step: int) -> mx.array:
         """Generate a batch of training data."""
-        # Randomly sample examples
-        indices = random.sample(range(len(self.train_data)), min(self.batch_size, len(self.train_data)))
-        examples = [self.train_data[i] for i in indices]
-        return self._create_batch(examples)
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_train_dataset:
+            # For streaming datasets, fetch examples on-the-fly
+            batch_docs = []
+            for _ in range(self.batch_size):
+                # Get next example from the streaming dataset
+                try:
+                    example = next(iter(self.hf_train_dataset))
+                    self._process_hf_example(example, batch_docs)
+                except StopIteration:
+                    # If we reach the end of the dataset, reset the iterator
+                    self.hf_train_dataset = self.hf_train_dataset.shuffle()
+                    example = next(iter(self.hf_train_dataset))
+                    self._process_hf_example(example, batch_docs)
+
+            return self._create_batch(batch_docs)
+        else:
+            # For regular datasets, use pre-loaded examples
+            # Randomly sample examples
+            indices = random.sample(range(len(self.train_data)), min(self.batch_size, len(self.train_data)))
+            examples = [self.train_data[i] for i in indices]
+            return self._create_batch(examples)
 
     def generate_validation_batch(self, batch_idx: int) -> mx.array:
         """Generate a batch of validation data."""
-        start_idx = batch_idx * self.batch_size
-        end_idx = min(start_idx + self.batch_size, len(self.val_data))
-        examples = self.val_data[start_idx:end_idx]
-        return self._create_batch(examples)
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_val_dataset:
+            # For streaming datasets, fetch examples on-the-fly
+            batch_docs = []
+            for _ in range(self.batch_size):
+                # Get next example from the streaming dataset
+                try:
+                    example = next(iter(self.hf_val_dataset))
+                    self._process_hf_example(example, batch_docs)
+                except StopIteration:
+                    # If we reach the end of the dataset, reset the iterator
+                    self.hf_val_dataset = self.hf_val_dataset.shuffle()
+                    example = next(iter(self.hf_val_dataset))
+                    self._process_hf_example(example, batch_docs)
+
+            return self._create_batch(batch_docs)
+        else:
+            # For regular datasets, use pre-loaded examples
+            start_idx = batch_idx * self.batch_size
+            end_idx = min(start_idx + self.batch_size, len(self.val_data))
+            examples = self.val_data[start_idx:end_idx]
+            return self._create_batch(examples)
 
     def _create_batch(self, examples: list) -> mx.array:
         """Create a batch from a list of examples."""
+        if not examples:
+            return None
+
         # Pad sequences to the same length
         max_len = max(len(ex["combined"]) for ex in examples)
         batch = []
@@ -192,11 +345,25 @@ class SFTDataManager:
 
     def has_validation_data(self) -> bool:
         """Check if validation data is available."""
-        return len(self.val_data) > 0
+        if self.using_hf_dataset:
+            # For Hugging Face datasets, check if validation split is available
+            return self.hf_val_dataset is not None or len(self.val_data) > 0
+        else:
+            # For file-based datasets, check if validation data is loaded
+            return len(self.val_data) > 0
 
     def num_validation_batches(self) -> int:
         """Get the number of validation batches."""
-        return (len(self.val_data) + self.batch_size - 1) // self.batch_size
+        if not self.has_validation_data():
+            return 0
+
+        if self.using_hf_dataset and self.config.use_streaming and self.hf_val_dataset:
+            # For streaming datasets, return a reasonable number of batches
+            # This is an estimate since we don't know the exact size of the dataset
+            return 100  # Arbitrary number, can be adjusted
+        else:
+            # For regular datasets, return the actual number of batches
+            return (len(self.val_data) + self.batch_size - 1) // self.batch_size
 
 
 class SFTTrainer:
